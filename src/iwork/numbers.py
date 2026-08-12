@@ -19,21 +19,25 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .applescript import AppleScriptError, decimal_separator, run
-from .pages import _existing_path, _writable_path
+from .applescript import AppleScriptError, run
+from .cells import (MAX_WIDTH, _column_widths, _coordinates, _letter,
+                    _tag)
+from .paths import existing as _existing_path, writable as _writable_path
 
 _REFERENCE = re.compile(r"[A-Z]{1,3}[1-9][0-9]{0,4}")
 """A cell reference in A1 notation, as the app writes it."""
 
-MIN_WIDTH, MAX_WIDTH = 56, 340
-"""Column width bounds, in points. Below the minimum a header is unreadable;
-above the maximum one long note would push every other column off the screen."""
 
 # Cells arrive already separated, one per argument: argv is read row by row.
 # Splitting the text HERE would be a mistake — inside a `tell application`
 # block an expression like `text items of` is sent to the APP instead of being
 # evaluated by AppleScript, and Numbers answers -1728 "can't get". Cost one
 # debugging session: the split stays in Python, where it belongs.
+# Styling goes through the `range` class, one call per range instead of one per
+# cell. On a 14x13 sheet the old cell-by-cell loop issued 182 property sets plus
+# a full second pass for every formatted column; the same layout is now a
+# handful of operations. It also unlocks what no cell property offers:
+# `text wrap`, `vertical alignment` and `merge`.
 _CREATE = '''
 on run argv
   set numRows to (item 1 of argv) as integer
@@ -41,6 +45,9 @@ on run argv
   set savePath to item 3 of argv
   set tableName to item 4 of argv
   set sheetName to item 5 of argv
+  set headerRows to (item 6 of argv) as integer
+  set numOps to (item 7 of argv) as integer
+  set cellBase to 7 + (numOps * 3)
   tell application "Numbers"
     set d to make new document
     tell sheet 1 of d
@@ -52,7 +59,7 @@ on run argv
         set column count to numCols
         repeat with i from 1 to numRows
           repeat with j from 1 to numCols
-            set v to item (5 + numCols + ((i - 1) * numCols) + j) of argv
+            set v to item (cellBase + ((i - 1) * numCols) + j) of argv
             if v is not "" then
               set payload to (text 2 thru -1 of v)
               -- The prefix is decided in Python. "t" = keep it text.
@@ -69,34 +76,46 @@ on run argv
         -- Tidiness. The default table ships with a header COLUMN, which turns
         -- the first data column into grey bold row labels — wrong for almost
         -- any real dataset, and it is the first thing you notice in a PDF.
-        set header row count to 1
+        set header row count to headerRows
         set header column count to 0
         set footer row count to 0
-        -- Numbers has no "fit to content" in AppleScript, so widths are
-        -- computed in Python from the actual strings and applied here.
-        repeat with j from 1 to numCols
-          set width of column j to ((item (5 + j) of argv) as integer)
-        end repeat
-        -- Column formats, applied last and to the DATA rows only: applying
-        -- them to the whole column would reformat the header text too.
-        set numFormats to (item (5 + numCols + (numRows * numCols) + 1) of argv) as integer
-        repeat with k from 1 to numFormats
-          set base to 5 + numCols + (numRows * numCols) + 1 + ((k - 1) * 2)
-          set col to (item (base + 1) of argv) as integer
-          set fmt to item (base + 2) of argv
-          repeat with i from 2 to numRows
-            try
-              if fmt is "currency" then
-                set format of cell col of row i to currency
-              else if fmt is "number" then
-                set format of cell col of row i to number
-              else if fmt is "percent" then
-                set format of cell col of row i to percent
-              else if fmt is "text" then
-                set format of cell col of row i to text
+        repeat with k from 1 to numOps
+          set base to 7 + ((k - 1) * 3)
+          -- `ref` is an AppleScript keyword (short for `a reference to`) and
+          -- using it as a variable is a syntax error about an unexpected end
+          -- of line. Same family of trap as `mod`.
+          set theRef to item (base + 1) of argv
+          set theOp to item (base + 2) of argv
+          set theVal to item (base + 3) of argv
+          try
+            if theOp is "width" then
+              set width of column (theRef as integer) to (theVal as integer)
+            else if theOp is "merge" then
+              merge range theRef
+            else if theOp is "wrap" then
+              set text wrap of range theRef to (theVal is "1")
+            else if theOp is "valign" then
+              if theVal is "center" then set vertical alignment of range theRef to center
+            else if theOp is "align" then
+              if theVal is "center" then
+                set alignment of range theRef to center
+              else if theVal is "right" then
+                set alignment of range theRef to right
+              else
+                set alignment of range theRef to left
               end if
-            end try
-          end repeat
+            else if theOp is "format" then
+              if theVal is "currency" then
+                set format of range theRef to currency
+              else if theVal is "number" then
+                set format of range theRef to number
+              else if theVal is "percent" then
+                set format of range theRef to percent
+              else if theVal is "text" then
+                set format of range theRef to text
+              end if
+            end if
+          end try
         end repeat
         if tableName is not "" then set name to tableName
       end tell
@@ -189,18 +208,21 @@ on run argv
       if row count < needRows then set row count to needRows
       if column count < needCols then set column count to needCols
       repeat with k from 1 to howMany
-        set ref to item (3 + (k * 2)) of argv
+        -- not `ref`: that is an AppleScript keyword and the script would not
+        -- even compile. The test suite now compiles every script for exactly
+        -- this reason.
+        set theRef to item (3 + (k * 2)) of argv
         set v to item (4 + (k * 2)) of argv
         if v is "" then
           -- an explicitly empty value means "empty this cell". Writing "" into
           -- it would leave a text cell that merely looks empty, and would keep
           -- counting in COUNTA and breaking SUM ranges.
-          clear cell ref
+          clear cell theRef
         else
           if (text 1 of v) is "t" then
-            set format of cell ref to text
+            set format of cell theRef to text
           end if
-          set value of cell ref to (text 2 thru -1 of v)
+          set value of cell theRef to (text 2 thru -1 of v)
         end if
       end repeat
     end tell
@@ -210,6 +232,75 @@ on run argv
   return "ok"
 end run
 '''
+
+
+_SORT = '''
+on run argv
+  set thePath to item 1 of argv
+  set theColumn to (item 2 of argv) as integer
+  -- not `descending`: that is also the name of the sort-direction enumerator,
+  -- and AppleScript resolves it to the constant, then fails coercing it to a
+  -- boolean. Compiles fine; breaks only at run time.
+  set goDown to (item 3 of argv) is "1"
+  set firstRow to (item 4 of argv) as integer
+  set skipLast to (item 5 of argv) as integer
+  set f to POSIX file thePath
+  tell application "Numbers"
+    set wasOpen to false
+    set doc to missing value
+    repeat with d in documents
+      try
+        if ((file of d) as string) is (f as string) then
+          set wasOpen to true
+          set doc to d
+          exit repeat
+        end if
+      end try
+    end repeat
+    if doc is missing value then set doc to open f
+    tell table 1 of sheet 1 of doc
+      set lastRow to (row count) - skipLast
+      set lastCol to column count
+      -- Sorting the whole table would drag the header into the ordering and
+      -- leave "Giorno" filed under G somewhere in the middle. The range starts
+      -- below the header rows.
+      set theRange to range ((name of cell 1 of row firstRow) & ":" & (name of cell lastCol of row lastRow))
+      if goDown then
+        sort by column theColumn direction descending in rows theRange
+      else
+        sort by column theColumn direction ascending in rows theRange
+      end if
+    end tell
+    save doc
+    if not wasOpen then close doc saving no
+  end tell
+  return "ok"
+end run
+'''
+
+
+def sort(path: str, column: str, descending: bool = False,
+         header_rows: int = 1, footer_rows: int = 0) -> str:
+    """Sort the first table by one column, leaving header and footer in place.
+
+    `column` is a letter, as in the app. Only the rows between `header_rows` and
+    the last `footer_rows` are reordered.
+
+    `footer_rows` matters more than it looks: a TOTAL row holding `=SUM(C2:C3)`
+    is, by value, the largest in its column, so a descending sort lifts it to
+    the top and its formula then points at the wrong rows. Measured — the totals
+    came back empty. Exclude it.
+    """
+    clean = column.strip().upper()
+    if not clean.isalpha() or not 1 <= len(clean) <= 3:
+        raise AppleScriptError(
+            f"Invalid column: '{column}'. Expected a letter, like B or AA.")
+    if header_rows < 0 or footer_rows < 0:
+        raise AppleScriptError("Row counts cannot be negative.")
+    _, col = _coordinates(f"{clean}1")
+    run(_SORT, _existing_path(path), str(col), "1" if descending else "0",
+        str(header_rows + 1), str(footer_rows), app="Numbers")
+    return f"sorted by {clean} {'descending' if descending else 'ascending'}"
 
 
 def set_cells(path: str, cells: dict[str, object]) -> int:
@@ -241,36 +332,28 @@ def set_cells(path: str, cells: dict[str, object]) -> int:
     return len(cells)
 
 
-def _coordinates(ref: str) -> tuple[int, int]:
-    """From "AA12" to (12, 27): needed to know how far to widen the table.
-
-    Writing into a cell outside the grid does not create it — Numbers answers
-    -10006 and writes nothing.
-    """
-    letters = "".join(c for c in ref if c.isalpha())
-    number = int("".join(c for c in ref if c.isdigit()))
-    col = 0
-    for c in letters:
-        col = col * 26 + (ord(c) - ord("A") + 1)
-    return number, col
-
-
 FORMATS = ("auto", "number", "currency", "percent", "text")
+_RANGE = re.compile(r"[A-Z]{1,3}[1-9][0-9]{0,4}:[A-Z]{1,3}[1-9][0-9]{0,4}")
 
 
 def create(rows: list[list[object]], save_in: str | None = None,
            table_name: str | None = None,
-           column_formats: dict[str, str] | None = None) -> str:
+           column_formats: dict[str, str] | None = None,
+           header_rows: int = 1, merge: list[str] | None = None) -> str:
     """Create a sheet from this data. The first row becomes the header.
 
     A cell starting with `=` is inserted as a formula and evaluated by the app.
 
-    The result is laid out rather than merely filled: one header row, no phantom
-    header column, and column widths fitted to the content.
+    The result is laid out rather than merely filled: header rows marked as
+    such, no phantom header column, column widths fitted to the content, and
+    wrapping switched off wherever the content already fits on one line.
 
     `column_formats` maps a column letter to one of `FORMATS` and is the only
     way to get consistent decimals: AppleScript exposes no decimal-places
     property, so a column left on `auto` shows 1360 next to 2349,5.
+
+    `header_rows` together with `merge` reproduces a two-tier header:
+    `header_rows=2, merge=["H1:I1"]` puts one CASSA spanning ENTRATE and USCITE.
     """
     if not rows or not rows[0]:
         raise AppleScriptError("At least one row and one column are required.")
@@ -279,25 +362,40 @@ def create(rows: list[list[object]], save_in: str | None = None,
         raise AppleScriptError(
             f"Rows have different lengths ({sorted(widths)}): the grid would "
             f"come out misaligned. Pad them with empty cells.")
+    if not 0 <= header_rows < len(rows):
+        raise AppleScriptError(
+            f"header_rows={header_rows} does not fit {len(rows)} rows: there "
+            f"would be no data left under the header.")
     where = _writable_path(save_in, ".numbers") if save_in else ""
     name = table_name or (Path(where).stem if where else "")
     cells = [_tag(c) for r in rows for c in r]
-    formats = _column_formats(column_formats, len(rows[0]))
+    ops = _layout_ops(rows, column_formats, header_rows, merge)
     return run(_CREATE, str(len(rows)), str(len(rows[0])), where,
-               name, name, *_column_widths(rows), *cells,
-               str(len(formats) // 2), *formats, app="Numbers")
+               name, name, str(header_rows), str(len(ops) // 3), *ops, *cells,
+               app="Numbers")
 
 
-def _column_formats(wanted: dict[str, str] | None, columns: int) -> list[str]:
-    """Validate the requested formats and flatten them into argv pairs.
+def _layout_ops(rows: list[list[object]], formats: dict[str, str] | None,
+                header_rows: int, merge: list[str] | None) -> list[str]:
+    """Build the range operations that turn a filled grid into a laid-out one.
 
-    Refused rather than ignored: a silently dropped format looks like the app
-    not supporting it, and sends the caller debugging the wrong layer.
+    Flattened into (reference, operation, value) triples because AppleScript
+    reads argv positionally; keeping every operation the same width is what
+    makes the loop on the other side readable.
     """
-    if not wanted:
-        return []
-    out: list[str] = []
-    for ref, fmt in wanted.items():
+    n_rows, n_cols = len(rows), len(rows[0])
+    ops: list[str] = []
+    for j, width in enumerate(_column_widths(rows), 1):
+        letter = _letter(j)
+        ops += [str(j), "width", width]
+        # Wrapping is what turned a notes column into three-line rows. It stays
+        # on only where the content genuinely cannot fit the widest column we
+        # allow; everywhere else the row stays one line tall.
+        ops += [f"{letter}1:{letter}{n_rows}", "wrap",
+                "0" if int(width) < MAX_WIDTH else "1"]
+    if header_rows:
+        ops += [f"A1:{_letter(n_cols)}{header_rows}", "valign", "center"]
+    for ref, fmt in (formats or {}).items():
         clean = fmt.strip().lower()
         if clean not in FORMATS:
             raise AppleScriptError(
@@ -305,90 +403,76 @@ def _column_formats(wanted: dict[str, str] | None, columns: int) -> list[str]:
         if clean == "auto":
             continue
         _, col = _coordinates(f"{ref.strip().upper()}1")
-        if not 1 <= col <= columns:
+        if not 1 <= col <= n_cols:
             raise AppleScriptError(
-                f"Column '{ref}' is outside the grid ({columns} columns).")
-        out += [str(col), clean]
-    return out
+                f"Column '{ref}' is outside the grid ({n_cols} columns).")
+        # Data rows only: formatting the header too would turn its text into a
+        # currency amount.
+        letter = _letter(col)
+        ops += [f"{letter}{header_rows + 1}:{letter}{n_rows}", "format", clean]
+    for ref in (merge or []):
+        clean = ref.strip().upper()
+        if not _RANGE.fullmatch(clean):
+            raise AppleScriptError(
+                f"Invalid range to merge: '{ref}'. Expected the app's own "
+                f"format, like H1:I1.")
+        ops += [clean, "merge", ""]
+    return ops
 
 
-def _column_widths(rows: list[list[object]]) -> list[str]:
-    """Fit each column to its longest value, within bounds.
+EXPORT_FORMATS = {"pdf": ("PDF", ".pdf"),
+                  "excel": ("Microsoft Excel", ".xlsx"),
+                  "csv": ("CSV", ".csv")}
+"""What Numbers can write out. Verified by exporting each and checking the
+result: the PDF opens, the .xlsx is a real Excel 2007+ file, the CSV is text.
 
-    Numbers exposes no "fit to content" to AppleScript, so the width is
-    estimated from the character count. Left uniform, a column of dates and a
-    column of long notes get the same 98 points: the notes wrap onto three
-    lines and drag the whole row's height with them.
-    """
-    out = []
-    for j in range(len(rows[0])):
-        longest = max(len(str("" if r[j] is None else r[j])) for r in rows)
-        # ~7.2pt per character at the default body size, plus cell padding;
-        # the header row is bold, so it is measured with the same allowance.
-        out.append(str(int(min(MAX_WIDTH, max(MIN_WIDTH, longest * 7.2 + 24)))))
-    return out
+The CSV is worth a warning — it is written with the **system list separator**
+(`;` on an Italian Mac, not a comma) and holds the *formatted* values, so a
+currency column comes out as `100,00 €` rather than `100`."""
 
-
-_GROUPED_COMMA_DECIMAL = re.compile(r"^-?\d{1,3}(\.\d{3})+(,\d+)?$")
-"""1.360,00 — dot groups, comma decimates."""
-_GROUPED_DOT_DECIMAL = re.compile(r"^-?\d{1,3}(,\d{3})+(\.\d+)?$")
-"""1,360.00 — comma groups, dot decimates."""
-_PLAIN = re.compile(r"^-?\d+([.,]\d+)?$")
-"""1360, 1360.5, 1360,5 — one separator at most, so it is the decimal one."""
-
-
-def _to_number(s: str) -> float | None:
-    """Read a number written in any of the common conventions, or None.
-
-    Accepting only `1360.5` would reject everything a person actually types on
-    an Italian keyboard, and — worse — accepting it *silently as text* is how a
-    column stops being summable without anyone noticing.
-
-    `1.360` stays ambiguous (1360 here, 1.36 in the US). It is read the way this
-    Mac would display it, which is the reading that matches what the user sees
-    on screen.
-    """
-    s = s.strip()
-    if not s:
-        return None
-    if _GROUPED_COMMA_DECIMAL.fullmatch(s):
-        return float(s.replace(".", "").replace(",", "."))
-    if _GROUPED_DOT_DECIMAL.fullmatch(s):
-        return float(s.replace(",", ""))
-    if _PLAIN.fullmatch(s):
-        body = s.replace(",", ".")
-        if s.count(".") == 1 and len(s.split(".")[1]) == 3 \
-                and decimal_separator() == ",":
-            return float(s.replace(".", ""))  # 1.360 read as thousands
-        return float(body)
-    return None
+_EXPORT = '''
+on run argv
+  set thePath to item 1 of argv
+  set destination to item 2 of argv
+  set theFormat to item 3 of argv
+  set f to POSIX file thePath
+  tell application "Numbers"
+    set wasOpen to false
+    set doc to missing value
+    repeat with d in documents
+      try
+        if ((file of d) as string) is (f as string) then
+          set wasOpen to true
+          set doc to d
+          exit repeat
+        end if
+      end try
+    end repeat
+    if doc is missing value then set doc to open f
+    if theFormat is "PDF" then
+      export doc to file ((POSIX file destination) as string) as PDF
+    else if theFormat is "Microsoft Excel" then
+      export doc to file ((POSIX file destination) as string) as Microsoft Excel
+    else
+      export doc to file ((POSIX file destination) as string) as CSV
+    end if
+    if not wasOpen then close doc saving no
+  end tell
+  return destination
+end run
+'''
 
 
-def _tag(c: object) -> str:
-    """Prefix the value with a letter telling Numbers how to treat it.
-
-    `t` = force text format, `x` = let the app decide, `""` = skip the cell
-    entirely. Necessary because Numbers, left to itself, turns "Giugno" into a
-    full date and "1-2" into a subtraction: silently, discovered only on
-    reading back.
-
-    Numbers are re-emitted with this Mac's decimal separator, because the app
-    parses what it is handed according to the system locale — a canonical
-    `1360.5` lands as text on an Italian Mac. Formulas pass through untouched.
-    """
-    s = "" if c is None else str(c)
-    if s == "":
-        # An empty marker would reach AppleScript as a lone prefix letter, and
-        # `text 2 thru -1` of a one-character string is a -1728 error. The
-        # empty string makes the script skip the cell, which is what we mean.
-        return ""
-    if s.startswith("="):
-        return "x" + s
-    n = _to_number(s)
-    if n is None:
-        return "t" + s
-    text = f"{n:.10g}"
-    return "x" + text.replace(".", decimal_separator())
+def export(path: str, destination: str, fmt: str = "pdf") -> str:
+    """Export a `.numbers` file to PDF, Excel or CSV."""
+    chosen = EXPORT_FORMATS.get(fmt.lower())
+    if chosen is None:
+        raise AppleScriptError(
+            f"Format '{fmt}' is not handled by Numbers. Available: "
+            f"{', '.join(EXPORT_FORMATS)}.")
+    name, ext = chosen
+    return run(_EXPORT, _existing_path(path), _writable_path(destination, ext),
+               name, app="Numbers")
 
 
 def read(path: str) -> list[list[str]]:

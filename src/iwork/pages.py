@@ -12,8 +12,20 @@ from __future__ import annotations
 from pathlib import Path
 
 from .applescript import AppleScriptError, run
+from .paths import existing as _existing_path, writable as _writable_path
 
-FORMATS = {"pdf": "PDF", "word": "Microsoft Word", "epub": "EPUB"}
+FORMATS = {"pdf": ("PDF", ".pdf"),
+           "word": ("Microsoft Word", ".docx"),
+           "epub": ("EPUB", ".epub"),
+           "text": ("unformatted text", ".txt"),
+           "rtf": ("formatted text", ".rtf")}
+"""Everything Pages will write out. `text` throws the formatting away, `rtf`
+keeps it — useful when the destination is not a word processor.
+
+Not listed because it does not work: **inserting images**. Both
+`make new image` on the document and on its `images` element fail
+(`Non so come creare TMAScriptImageInfoProxy`, and an AppleEvent handler
+error). Keynote accepts images; Pages does not."""
 
 TITLE_SIZE, H1_SIZE, H2_SIZE, BODY_SIZE = 26, 18, 14, 12
 BOLD_FONT = "HelveticaNeue-Bold"
@@ -30,18 +42,39 @@ matches the default template (whose body font is `HelveticaNeue`)."""
 # Styles are applied paragraph by paragraph AFTER the text is in place: the
 # whole point is that a generated document should not arrive as one flat wall
 # of 12pt text.
+_TEMPLATES = '''
+on run argv
+  tell application "Pages"
+    set theNames to {}
+    repeat with t in templates
+      set end of theNames to name of t
+    end repeat
+  end tell
+  set savedDelim to AppleScript's text item delimiters
+  set AppleScript's text item delimiters to linefeed
+  set out to theNames as string
+  set AppleScript's text item delimiters to savedDelim
+  return out
+end run
+'''
+
 _CREATE = '''
 on run argv
   set theText to item 1 of argv
   set savePath to item 2 of argv
   set howMany to (item 3 of argv) as integer
+  set templateName to item 4 of argv
   tell application "Pages"
-    set d to make new document
+    if templateName is "" then
+      set d to make new document
+    else
+      set d to make new document with properties {document template:template templateName}
+    end if
     set body text of d to theText
     repeat with k from 1 to howMany
-      set idx to (item (1 + (k * 3)) of argv) as integer
-      set sz to (item (2 + (k * 3)) of argv) as integer
-      set faceName to item (3 + (k * 3)) of argv
+      set idx to (item (2 + (k * 3)) of argv) as integer
+      set sz to (item (3 + (k * 3)) of argv) as integer
+      set faceName to item (4 + (k * 3)) of argv
       try
         set size of paragraph idx of body text of d to sz
         if faceName is not "" then
@@ -107,6 +140,10 @@ on run argv
       export doc to file ((POSIX file destination) as string) as PDF
     else if theFormat is "Microsoft Word" then
       export doc to file ((POSIX file destination) as string) as Microsoft Word
+    else if theFormat is "unformatted text" then
+      export doc to file ((POSIX file destination) as string) as unformatted text
+    else if theFormat is "formatted text" then
+      export doc to file ((POSIX file destination) as string) as formatted text
     else
       export doc to file ((POSIX file destination) as string) as EPUB
     end if
@@ -201,7 +238,18 @@ def append(path: str, text: str) -> int:
     return len(text.split("\n"))
 
 
-def create(text: str, save_in: str | None = None) -> str:
+def available_templates() -> list[str]:
+    """The installed Pages templates, by name. 111 on a stock Mac.
+
+    Creating from one is the difference between a document that looks generated
+    and one that looks designed — the blank default carries no letterhead, no
+    margins worth the name and no typographic scale.
+    """
+    return [r for r in run(_TEMPLATES, app="Pages").splitlines() if r.strip()]
+
+
+def create(text: str, save_in: str | None = None,
+           template: str | None = None) -> str:
     """Create a document with this text. Leaves it open on screen.
 
     Staying open is deliberate: whoever generates a document almost always
@@ -211,15 +259,26 @@ def create(text: str, save_in: str | None = None) -> str:
     title, and lines starting with `# ` or `## ` become headings with the marker
     removed. Everything else is body text.
     """
+    if template is not None:
+        names = available_templates()
+        if template not in names:
+            raise AppleScriptError(
+                f"Template '{template}' does not exist. The names are "
+                f"localized; on this Mac there are {len(names)}, for example: "
+                f"{', '.join(names[:6])}...")
     lines = _spaced(text.split("\n"))
     clean, styles = [], []
     for i, line in enumerate(lines, 1):
         size, bold, body = _style_of(line, first=i == 1)
         clean.append(body)
-        styles += [str(i), str(size), BOLD_FONT if bold else ""]
+        # A template brings its own typeface, and forcing Helvetica headings
+        # onto a serif letterhead looks like two documents glued together. With
+        # a template only the sizes are imposed; the face is the template's.
+        styles += [str(i), str(size),
+                   BOLD_FONT if (bold and template is None) else ""]
     where = _writable_path(save_in, ".pages") if save_in else ""
     return run(_CREATE, "\n".join(clean), where,
-               str(len(lines)), *styles, app="Pages")
+               str(len(lines)), template or "", *styles, app="Pages")
 
 
 def _spaced(lines: list[str]) -> list[str]:
@@ -259,39 +318,12 @@ def read(path: str) -> str:
 
 
 def export(path: str, destination: str, fmt: str = "pdf") -> str:
-    """Export a `.pages` file to PDF, Word or EPUB."""
-    f = FORMATS.get(fmt.lower())
-    if f is None:
+    """Export a `.pages` file to PDF, Word, EPUB, plain text or RTF."""
+    chosen = FORMATS.get(fmt.lower())
+    if chosen is None:
         raise AppleScriptError(
             f"Format '{fmt}' is not handled by Pages. Available: "
             f"{', '.join(FORMATS)}.")
-    ext = {"pdf": ".pdf", "word": ".docx", "epub": ".epub"}[fmt.lower()]
+    name, ext = chosen
     return run(_EXPORT, _existing_path(path),
-               _writable_path(destination, ext), f, app="Pages")
-
-
-def _existing_path(p: str) -> str:
-    """Check before calling the app: AppleScript's error for a missing file is
-    a cryptic -43 that does not say which file is missing."""
-    q = Path(p).expanduser()
-    if not q.exists():
-        raise AppleScriptError(f"No such file: {q}")
-    return str(q)
-
-
-def _writable_path(p: str, extension: str) -> str:
-    """Normalize the destination, never overwriting silently.
-
-    Overwriting is irreversible and there is no way to notice it from the tool's
-    reply: better an explicit error and a different name.
-    """
-    q = Path(p).expanduser()
-    if q.suffix.lower() != extension:
-        q = q.with_suffix(extension)
-    if q.exists():
-        raise AppleScriptError(
-            f"Already exists: {q}. Pick another name — this tool does not "
-            f"overwrite, because the previous file would not be recoverable.")
-    if not q.parent.is_dir():
-        raise AppleScriptError(f"No such folder: {q.parent}")
-    return str(q)
+               _writable_path(destination, ext), name, app="Pages")

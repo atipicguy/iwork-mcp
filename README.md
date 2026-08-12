@@ -23,7 +23,7 @@ macOS with iWork installed, and Python 3.11+.
 git clone https://github.com/<you>/iwork-mcp.git
 cd iwork-mcp
 uv sync
-uv run pytest        # 69 tests, no app windows opened
+uv run pytest        # 95 tests, no app windows opened
 ```
 
 Register it in `~/.claude.json`, under `mcpServers`:
@@ -45,11 +45,19 @@ separates a missing app from a denied permission from a broken script.
 | Tool | What it does |
 |---|---|
 | `iwork_status` | which apps respond, and with what version |
-| `pages_create` / `pages_read` / `pages_export` | documents; export to PDF, Word, EPUB |
+| `pages_create` / `pages_read` | documents, with a real heading hierarchy |
+| `pages_templates` | the 111 installed templates, by name |
+| `pages_export` | PDF, Word, EPUB, plain text, RTF |
 | `pages_replace` / `pages_append` | edit an existing document **without wrecking its styles** |
 | `numbers_create` / `numbers_read` | spreadsheets, with **real formulas** |
 | `numbers_set` | write specific cells in an existing sheet; the app recalculates |
-| `keynote_layouts` / `keynote_create` / `keynote_export_pdf` | presentations |
+| `numbers_sort` | sort by a column, header left in place |
+| `numbers_export` | PDF, Excel, CSV |
+| `keynote_themes` / `keynote_layouts` | the 53 installed themes and their layouts |
+| `keynote_create` | presentations, with presenter notes |
+| `keynote_add_image` / `keynote_add_chart` | put an image or one of 6 chart types on a slide |
+| `keynote_slide_size` | the theme's slide dimensions, before choosing coordinates |
+| `keynote_export` | PDF (optionally with notes), PowerPoint, PNG slide images |
 
 Filling in a template — a contract, a letter — is a sequence of `pages_replace` calls on
 the placeholders. Updating a quote is `numbers_set` on three cells: the formulas that
@@ -61,12 +69,15 @@ driving a spreadsheet and producing a CSV that looks like one.
 
 ```python
 numbers_create(
-    rows=[["Guest", "Nights", "Gross"],
-          ["Maja Miletic", "7", "1.360,00"],
-          ["Martin Richardson", "5", "1.220,00"],
-          ["TOTAL", "=SUM(B2:B3)", "=SUM(C2:C3)"]],
+    rows=[["Guest", "Nights", "CASH", "",      "TOTAL"],
+          ["",      "",       "IN",   "OUT",   ""],
+          ["Maja Miletic", "7", "1.360,00", "", "=C3-D3"],
+          ["Martin Richardson", "5", "1.220,00", "", "=C4-D4"],
+          ["TOTAL", "=SUM(B3:B4)", "=SUM(C3:C4)", "", "=SUM(E3:E4)"]],
     save_in="~/Desktop/bookings.numbers",
-    column_formats={"C": "currency"},
+    header_rows=2,                       # two-tier header
+    merge=["C1:D1"],                     # one CASH spanning IN and OUT
+    column_formats={"C": "currency", "D": "currency", "E": "currency"},
 )
 ```
 
@@ -140,6 +151,35 @@ the app rather than type them.
 
 **Numbers read back are localized.** `1250.5` comes back as `1250,5`. Anyone converting
 to float needs to know.
+
+**`ref` and `descending` cannot be used as variable names.** `ref` is short for
+`a reference to`, so a script using it does not compile — and the parse error
+points at the *following* statement, not the guilty one. `descending` is worse:
+it is also the sort-direction enumerator, so the script compiles fine and fails
+at run time trying to coerce a constant to a boolean. `mod` is a third one, the
+modulo operator. The test suite runs `osacompile` over every script in the
+package, which catches the whole first family in milliseconds without opening an
+app; the second kind only surfaces when the script actually runs.
+
+**Formulas come back localized.** Write `=SUM(B2:B4)`, read the cell's `formula`
+property, and you get `=SOMMA(B2:B4)` on an Italian Mac. A round-trip that
+rewrites what it reads will produce formulas that only work in one language.
+
+**A CSV export is not comma-separated.** Numbers writes it with the system list
+separator — `;` here — and with the *formatted* values, so a currency column
+comes out as `100,00 €`.
+
+**Pages cannot insert images.** `make new image` fails on the document
+(`Non so come creare TMAScriptImageInfoProxy`) and on its `images` element (an
+AppleEvent handler error). Keynote accepts them without complaint. Similarly
+**Numbers cannot create sheets**: `make new sheet` fails, though a second
+*table* inside an existing sheet works.
+
+**The slide size comes from the theme, not from Keynote.** "Bianco di base" is
+1920x1080 and "Bianco" is 1024x768, so coordinates that centre an image in one
+put it off the edge of the other. `keynote_slide_size` asks, and anything placed
+too close to an edge is nudged back inside — the object's own width is only
+knowable after it exists.
 
 **There is no decimal-places property.** Column format (`number`, `currency`, `percent`,
 `text`) is settable; the number of decimals is not. A column left on `auto` shows 1360

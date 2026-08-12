@@ -44,6 +44,20 @@ def run(script: str, *arguments: str, timeout: int = TIMEOUT,
     """
     if app:
         ensure_running(app)
+        try:
+            return _once(script, arguments, timeout)
+        except AppleScriptError as e:
+            # -609 "the connection is invalid" turns up on the first scripted
+            # call after an app has just been launched: the process is up and
+            # answers `version`, but the Apple event port is not settled yet.
+            # Observed once on Numbers, and it succeeded on an immediate retry.
+            if "-609" not in str(e):
+                raise
+            time.sleep(1.5)
+    return _once(script, arguments, timeout)
+
+
+def _once(script: str, arguments: tuple[str, ...], timeout: int) -> str:
     try:
         p = subprocess.run(
             ["osascript", "-", *arguments],

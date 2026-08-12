@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from iwork.applescript import AppleScriptError, rows_to_text
-from iwork.numbers import _column_widths, _tag, _to_number
+from iwork.cells import _column_widths, _tag, _to_number
 from iwork.pages import _existing_path, _spaced, _style_of, _writable_path
 
 
@@ -21,7 +21,36 @@ def italian_locale(monkeypatch):
     """Pin the decimal separator so the suite does not depend on the Mac it
     runs on. The locale-dependent behaviour is the thing under test, so it must
     be an input, not an ambient condition."""
-    monkeypatch.setattr("iwork.numbers.decimal_separator", lambda: ",")
+    monkeypatch.setattr("iwork.cells.decimal_separator", lambda: ",")
+
+
+class TestAppleScriptCompiles:
+    """Every script is compiled, without running it or opening an app.
+
+    AppleScript's reserved words are a minefield discovered one crash at a
+    time: `mod` is the modulo operator, `ref` is short for `a reference to`,
+    and using either as a variable fails at parse time with a message about an
+    unexpected end of line — pointing at the *next* statement, not the guilty
+    one. `osacompile` catches the whole family in milliseconds.
+    """
+
+    @staticmethod
+    def _scripts():
+        import iwork.keynote, iwork.numbers, iwork.pages
+        for mod in (iwork.pages, iwork.numbers, iwork.keynote):
+            for name, value in vars(mod).items():
+                if name.isupper() and isinstance(value, str) and "on run" in value:
+                    yield f"{mod.__name__}.{name}", value
+
+    def test_there_are_scripts_to_check(self):
+        assert len(list(self._scripts())) >= 8
+
+    def test_every_script_compiles(self):
+        import subprocess
+        for name, src in self._scripts():
+            p = subprocess.run(["osacompile", "-o", "/dev/null", "-"],
+                               input=src, capture_output=True, text=True)
+            assert p.returncode == 0, f"{name} non compila:\n{p.stderr}"
 
 
 class TestCellTyping:
@@ -144,26 +173,92 @@ class TestDocumentStructure:
         assert _spaced(["# Heading", "Body"]) == ["# Heading", "Body"]
 
 
+GRID = [["a", "b", "c"], ["1", "2", "3"], ["4", "5", "6"]]
+
+
+def _ops(formats=None, header_rows=1, merge=None, rows=None):
+    from iwork.numbers import _layout_ops
+    return _layout_ops(rows or GRID, formats, header_rows, merge)
+
+
+def _triples(ops):
+    return [tuple(ops[i:i + 3]) for i in range(0, len(ops), 3)]
+
+
 class TestFormats:
     def test_an_unknown_column_format_is_refused(self):
         """Silently dropping it looks like the app not supporting the format,
         and sends the caller debugging the wrong layer."""
-        from iwork import numbers
         with pytest.raises(AppleScriptError, match="Unknown format"):
-            numbers._column_formats({"A": "money"}, 3)
+            _ops({"A": "money"})
 
     def test_a_column_outside_the_grid_is_refused(self):
-        from iwork import numbers
         with pytest.raises(AppleScriptError, match="outside the grid"):
-            numbers._column_formats({"Z": "currency"}, 3)
+            _ops({"Z": "currency"})
 
-    def test_letters_become_column_numbers(self):
-        from iwork import numbers
-        assert numbers._column_formats({"C": "currency"}, 5) == ["3", "currency"]
+    def test_a_format_covers_the_data_rows_only(self):
+        """Formatting the header too would turn its text into a currency
+        amount."""
+        assert ("C2:C3", "format", "currency") in _triples(_ops({"C": "currency"}))
+
+    def test_a_format_skips_every_header_row(self):
+        assert ("C3:C3", "format", "currency") in _triples(
+            _ops({"C": "currency"}, header_rows=2))
 
     def test_auto_is_a_no_op(self):
+        assert not [t for t in _triples(_ops({"A": "auto"})) if t[1] == "format"]
+
+
+class TestLayoutOps:
+    """Styling goes through the `range` class: one call per range instead of
+    one per cell, and it unlocks text wrap and merge, which no cell property
+    offers."""
+
+    def test_every_column_gets_a_width_and_a_wrap(self):
+        ops = _triples(_ops())
+        assert len([t for t in ops if t[1] == "width"]) == 3
+        assert len([t for t in ops if t[1] == "wrap"]) == 3
+
+    def test_short_columns_do_not_wrap(self):
+        """Wrapping is what turned the notes column into three-line rows."""
+        assert ("A1:A3", "wrap", "0") in _triples(_ops())
+
+    def test_a_column_too_wide_to_fit_keeps_wrapping(self):
+        rows = [["note"], ["x" * 400], ["y"]]
+        assert ("A1:A3", "wrap", "1") in _triples(_ops(rows=rows))
+
+    def test_the_header_is_vertically_centred(self):
+        assert ("A1:C1", "valign", "center") in _triples(_ops())
+
+    def test_no_header_means_no_header_styling(self):
+        assert not [t for t in _triples(_ops(header_rows=0)) if t[1] == "valign"]
+
+    def test_merge_is_passed_through(self):
+        assert ("A1:B1", "merge", "") in _triples(_ops(merge=["a1:b1"]))
+
+    def test_an_invalid_merge_range_is_refused(self):
+        with pytest.raises(AppleScriptError, match="Invalid range to merge"):
+            _ops(merge=["A1"])
+
+    def test_operations_come_in_triples(self):
+        assert len(_ops(merge=["A1:B1"], formats={"B": "currency"})) % 3 == 0
+
+
+class TestColumnLetters:
+    @pytest.mark.parametrize("col,letter", [
+        (1, "A"), (2, "B"), (26, "Z"), (27, "AA"), (28, "AB"), (52, "AZ")])
+    def test_letter_is_the_inverse_of_coordinates(self, col, letter):
+        from iwork.cells import _coordinates, _letter
+        assert _letter(col) == letter
+        assert _coordinates(f"{letter}1")[1] == col
+
+
+class TestHeaderRows:
+    def test_a_header_taller_than_the_data_is_refused(self):
+        """Two header rows on a two-row grid would leave nothing underneath."""
         from iwork import numbers
-        assert numbers._column_formats({"A": "auto"}, 3) == []
+        with pytest.raises(AppleScriptError, match="header_rows"):
+            numbers.create([["a"], ["b"]], header_rows=2)
 
 
 class TestPaths:
@@ -255,6 +350,38 @@ class TestCellReferences:
         f.write_text("")
         with pytest.raises(AppleScriptError, match="No cells"):
             numbers.set_cells(str(f), {})
+
+
+class TestSorting:
+    @pytest.mark.parametrize("bad", ["3", "B2", "", "-", "ABCD"])
+    def test_a_column_that_is_not_a_letter_is_refused(self, bad, tmp_path: Path):
+        from iwork import numbers
+        f = tmp_path / "x.numbers"
+        f.write_text("")
+        with pytest.raises(AppleScriptError, match="Invalid column"):
+            numbers.sort(str(f), bad)
+
+    @pytest.mark.parametrize("kwargs", [{"header_rows": -1}, {"footer_rows": -1}])
+    def test_negative_row_counts_refused(self, kwargs, tmp_path: Path):
+        from iwork import numbers
+        f = tmp_path / "x.numbers"
+        f.write_text("")
+        with pytest.raises(AppleScriptError, match="cannot be negative"):
+            numbers.sort(str(f), "A", **kwargs)
+
+
+class TestExportFormats:
+    def test_numbers_rejects_an_unknown_format(self, tmp_path: Path):
+        from iwork import numbers
+        f = tmp_path / "x.numbers"
+        f.write_text("")
+        with pytest.raises(AppleScriptError, match="not handled by Numbers"):
+            numbers.export(str(f), str(tmp_path / "y.odt"), "openoffice")
+
+    def test_each_format_carries_its_extension(self):
+        from iwork.numbers import EXPORT_FORMATS
+        assert EXPORT_FORMATS["excel"][1] == ".xlsx"
+        assert EXPORT_FORMATS["csv"][1] == ".csv"
 
 
 class TestSlideOverflow:
