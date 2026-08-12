@@ -2,16 +2,17 @@
 
 An MCP server that drives **Pages, Numbers and Keynote** from Claude Code (or any
 MCP client): it generates documents, spreadsheets and presentations, and exports them
-to PDF or Word.
+to PDF, Word, Excel, CSV, PowerPoint, RTF, plain text or PNG slide images.
 
 The model writes the content; the Apple apps do the layout, the arithmetic and the
 exporting. There is no proprietary format to reconstruct — `.pages`, `.numbers` and
 `.key` are compressed Protobuf inside a ZIP, and reading them by hand is a dead end.
 Here they are written by the people who invented them.
 
-Output is **laid out, not merely filled in**: fitted column widths, a real header row,
-a heading hierarchy in documents. A generated file should look like someone made it,
-not like a data dump that happens to open in Numbers.
+Output is **laid out, not merely filled in**: fitted column widths, real header rows,
+merged spanning headers, a heading hierarchy in documents, and any of the 53 Keynote
+themes or 111 Pages templates installed on the machine. A generated file should look
+like someone made it, not like a data dump that happens to open in Numbers.
 
 ## Requirements
 
@@ -20,10 +21,10 @@ macOS with iWork installed, and Python 3.11+.
 ## Install
 
 ```bash
-git clone https://github.com/<you>/iwork-mcp.git
+git clone https://github.com/atipicguy/iwork-mcp.git
 cd iwork-mcp
 uv sync
-uv run pytest        # 95 tests, no app windows opened
+uv run pytest        # 96 tests, no app windows opened
 ```
 
 Register it in `~/.claude.json`, under `mcpServers`:
@@ -57,15 +58,39 @@ separates a missing app from a denied permission from a broken script.
 | `keynote_create` | presentations, with presenter notes |
 | `keynote_add_image` / `keynote_add_chart` | put an image or one of 6 chart types on a slide |
 | `keynote_slide_size` | the theme's slide dimensions, before choosing coordinates |
-| `keynote_export` | PDF (optionally with notes), PowerPoint, PNG slide images |
+| `keynote_export` / `keynote_export_pdf` | PDF (optionally with notes), PowerPoint, PNG slide images |
 
-Filling in a template — a contract, a letter — is a sequence of `pages_replace` calls on
-the placeholders. Updating a quote is `numbers_set` on three cells: the formulas that
-depend on them recalculate by themselves, because Numbers does it, not us.
+Filling in a document you already have — a contract, a letter — is a sequence of
+`pages_replace` calls on its placeholders. Updating a quote is `numbers_set` on three
+cells: the formulas that depend on them recalculate by themselves, because Numbers does
+it, not us.
 
 Formulas are written as in the app: `=SUM(B2:B3)` is inserted and **computed**. Reading
 the cell back gives the result, not the formula text. That is the difference between
 driving a spreadsheet and producing a CSV that looks like one.
+
+### Design comes from the app, not from us
+
+The apps ship a lot of design, and none of it is reachable by writing a file by hand.
+`keynote_themes` and `pages_templates` list what is installed — 53 and 111 respectively
+on a stock Mac — and `keynote_create(theme=...)` / `pages_create(template=...)` build on
+one. This is the single biggest difference in how the result looks: the default blank
+theme is what makes a generated deck read as generated.
+
+With a Pages template the heading face is left alone deliberately. Forcing Helvetica
+headings onto a serif letterhead looks like two documents glued together, so only the
+sizes are imposed and the typeface stays the template's.
+
+### Spreadsheets that look like the one you were copying
+
+`header_rows=2` plus `merge=["H1:I1"]` gives the two-tier header real bookkeeping uses:
+one CASSA spanning ENTRATE and USCITE. Column widths are fitted to the content and
+wrapping is switched off wherever the content already fits, so a notes column stops
+dragging every row to three lines tall.
+
+`numbers_sort` leaves the header in place — and takes `footer_rows`, which matters more
+than it sounds: a TOTAL row is by value the largest in its column, so a descending sort
+lifts it to the top and its formula then points at the wrong rows.
 
 ```python
 numbers_create(
@@ -80,6 +105,16 @@ numbers_create(
     column_formats={"C": "currency", "D": "currency", "E": "currency"},
 )
 ```
+
+### Slides that carry more than bullets
+
+Each slide accepts `notes`, which become the presenter notes;
+`keynote_export(fmt="pdf", notes=True)` then produces the handout with the notes printed
+under each slide, which is the form people actually rehearse from. `keynote_add_chart`
+places one of six chart types, `keynote_add_image` an image. Both take coordinates —
+worth passing, because left to itself Keynote centres the object on top of the bullets —
+and anything that would hang off the edge is nudged back inside.
+
 
 ## What it deliberately does not do
 
@@ -185,9 +220,6 @@ knowable after it exists.
 `text`) is settable; the number of decimals is not. A column left on `auto` shows 1360
 next to 2349,5. `column_formats={"C": "currency"}` is the way to get consistent
 decimals.
-
-**`mod` is a reserved word** in AppleScript (it is the modulo operator): using it as a
-variable gives a syntax error that talks about an expected expression.
 
 **The apps are not named what they seem.** On this machine they are
 `Pages Creator Studio.app`, bundle id `com.apple.Pages` — not `Pages.app` nor
