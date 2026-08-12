@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+
+# Generated documents: this server's own output does not belong in the repo.
+*.pages
+*.numbers
+*.key

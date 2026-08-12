@@ -1,0 +1,164 @@
+# iwork-mcp
+
+An MCP server that drives **Pages, Numbers and Keynote** from Claude Code (or any
+MCP client): it generates documents, spreadsheets and presentations, and exports them
+to PDF or Word.
+
+The model writes the content; the Apple apps do the layout, the arithmetic and the
+exporting. There is no proprietary format to reconstruct — `.pages`, `.numbers` and
+`.key` are compressed Protobuf inside a ZIP, and reading them by hand is a dead end.
+Here they are written by the people who invented them.
+
+Output is **laid out, not merely filled in**: fitted column widths, a real header row,
+a heading hierarchy in documents. A generated file should look like someone made it,
+not like a data dump that happens to open in Numbers.
+
+## Requirements
+
+macOS with iWork installed, and Python 3.11+.
+
+## Install
+
+```bash
+git clone https://github.com/<you>/iwork-mcp.git
+cd iwork-mcp
+uv sync
+uv run pytest        # 69 tests, no app windows opened
+```
+
+Register it in `~/.claude.json`, under `mcpServers`:
+
+```json
+"iwork": {
+  "command": "/absolute/path/to/iwork-mcp/.venv/bin/python",
+  "args": ["-m", "iwork.server_mcp"],
+  "cwd": "/absolute/path/to/iwork-mcp"
+}
+```
+
+On first use macOS asks for **automation permission** for each app: grant it, or every
+call fails. `iwork_status` is the tool to call first when something is wrong — it
+separates a missing app from a denied permission from a broken script.
+
+## Tools
+
+| Tool | What it does |
+|---|---|
+| `iwork_status` | which apps respond, and with what version |
+| `pages_create` / `pages_read` / `pages_export` | documents; export to PDF, Word, EPUB |
+| `pages_replace` / `pages_append` | edit an existing document **without wrecking its styles** |
+| `numbers_create` / `numbers_read` | spreadsheets, with **real formulas** |
+| `numbers_set` | write specific cells in an existing sheet; the app recalculates |
+| `keynote_layouts` / `keynote_create` / `keynote_export_pdf` | presentations |
+
+Filling in a template — a contract, a letter — is a sequence of `pages_replace` calls on
+the placeholders. Updating a quote is `numbers_set` on three cells: the formulas that
+depend on them recalculate by themselves, because Numbers does it, not us.
+
+Formulas are written as in the app: `=SUM(B2:B3)` is inserted and **computed**. Reading
+the cell back gives the result, not the formula text. That is the difference between
+driving a spreadsheet and producing a CSV that looks like one.
+
+```python
+numbers_create(
+    rows=[["Guest", "Nights", "Gross"],
+          ["Maja Miletic", "7", "1.360,00"],
+          ["Martin Richardson", "5", "1.220,00"],
+          ["TOTAL", "=SUM(B2:B3)", "=SUM(C2:C3)"]],
+    save_in="~/Desktop/bookings.numbers",
+    column_formats={"C": "currency"},
+)
+```
+
+## What it deliberately does not do
+
+- **It does not close documents it did not open.** Launching an iWork app reopens the
+  ones you had on screen: two real ones came back during development. An
+  indiscriminate `close` would throw away someone else's work.
+- **It does not overwrite existing files.** That is irreversible and invisible in the
+  reply: whoever reads "done" has no way to know what was there before.
+- **It never concatenates text into the script.** See below: that would be injection.
+
+## The traps, all paid for
+
+**AppleScript injection.** Interpolating user text into the script source is the same
+vulnerability as in SQL: a quote breaks it, a carefully crafted line *executes*. Here
+everything goes through `osascript - arg1 arg2` and `on run argv`. Verified with text
+containing `tell application "Finder" to beep`: it landed in the document as text and
+was not executed.
+
+**`text items of` inside a `tell application` block.** It is sent to the **app** instead
+of being evaluated by AppleScript, and the app answers `-1728 can't get`. Cost one
+debugging session on Numbers and a second one avoided on Keynote. All text splitting
+stays in Python; the apps receive values already separated, one per argument.
+
+**Numbers parses what it is handed according to the system locale.** Measured on an
+Italian Mac: `"1360.5"` lands in the cell as *text*, `"1360,5"` becomes the number
+1360.5. A canonical decimal therefore produces a column that cannot be summed — and
+nothing in the reply says so. Values are parsed in Python (accepting `1360.5`,
+`1360,5`, `1.360,00` and `1,360.00`) and re-emitted with this Mac's separator.
+
+**`set bold of paragraph 1 of body text to true` replaces the paragraph's text with the
+word "true".** No error. Pages exposes only `size`, `font` and `color` as usable text
+properties — `paragraph style`, `alignment`, `space before` and `line spacing` are not
+settable at all. Weight comes from a bold face instead. The lesson generalises: with
+these apps, checking that a command did not raise is not evidence that it did what you
+meant. Read the value back.
+
+**Rewriting `body text` wholesale flattens the formatting.** The worst of the lot,
+because the first test hides it: replace one word and rewrite the whole body, and the
+text comes out right and looks done — but a 9pt paragraph came back at 28pt, having
+inherited the first one's style. On a contract template that means shipping a file that
+reads correctly and is laid out wrong. Edits are therefore **targeted**: only the
+affected `paragraph N of body text` is reassigned, and the others stay intact (verified:
+26 stays 26, 8 stays 8 after a replacement of a different length).
+
+**A closed iWork app is not launched by `tell application`.** The script fails with a
+flat `-600, the application is not running`, and so does the first call of every
+session. AppleScript's own `launch` and `activate` do not fix it — measured on Keynote,
+both still returned -600. Only LaunchServices does: `open -g -a`, with `-g` so the app
+does not steal focus mid-task.
+
+**Writing outside the grid does not widen the table.** In Numbers a cell beyond
+`row count` is not created: it is a flat `-10006`. The table has to be widened first,
+which means translating `AA12` into row 12, column 27.
+
+**Empty cells are `missing value`**, which coerced to a string becomes the *text*
+"missing value" — and would land in the data as if someone had typed it.
+
+**Numbers infers types, and gets it wrong silently.** Writing `Giugno` into a cell reads
+back `lunedì 1 giugno 2026 alle ore 00:00:00`. No error: just wrong data. The format
+must be imposed **before** the value (`set format of cell … to text`), and only on what
+is neither a number nor a formula — forcing numbers too would make them unsummable and
+break the formulas using them.
+
+**Keynote layout names are localized.** "Title & Bullets" does not exist on an Italian
+Mac: it is called "Titolo ed elenco". `keynote_layouts` asks the app instead of listing
+them hard-coded, and the missing-layout error hands back the real ones. One of them even
+contains an invisible soft hyphen (`Dichiarazio­ne`) — one more reason to copy them from
+the app rather than type them.
+
+**Numbers read back are localized.** `1250.5` comes back as `1250,5`. Anyone converting
+to float needs to know.
+
+**There is no decimal-places property.** Column format (`number`, `currency`, `percent`,
+`text`) is settable; the number of decimals is not. A column left on `auto` shows 1360
+next to 2349,5. `column_formats={"C": "currency"}` is the way to get consistent
+decimals.
+
+**`mod` is a reserved word** in AppleScript (it is the modulo operator): using it as a
+variable gives a syntax error that talks about an expected expression.
+
+**The apps are not named what they seem.** On this machine they are
+`Pages Creator Studio.app`, bundle id `com.apple.Pages` — not `Pages.app` nor
+`com.apple.iWork.Pages`. Searching for the historical names returns nothing and leads
+to the wrong conclusion that iWork is not installed.
+
+## Boundaries
+
+- No writing outside the paths given explicitly in the calls.
+- No commits, no pushes.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
