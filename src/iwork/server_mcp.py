@@ -29,6 +29,7 @@ import os
 import sys
 
 from mcp.server import MCPServer
+from pydantic import BaseModel, Field
 
 from . import keynote, numbers, pages
 from .applescript import AppleScriptError, check_app
@@ -49,6 +50,19 @@ server = MCPServer(
         "and does not close documents that were already open."
     ),
 )
+
+
+# `list[dict]` produced `{"type": "object", "additionalProperties": true}` —
+# valid JSON Schema, and nothing at all for a client that compiles the schema
+# into a constrained-decoding grammar, which is what LM Studio does. Naming the
+# fields also tells the model what a slide may contain, which a bare object
+# never did. Kept as a comment rather than a docstring: a model docstring is
+# copied verbatim into the schema, where it is dead weight in every request.
+class Slide(BaseModel):
+    title: str = Field(description="The slide's title.")
+    bullets: list[str] = Field(default_factory=list,
+                               description="Bullet points; omit for a title-only slide.")
+    notes: str = Field(default="", description="Presenter notes for this slide.")
 
 
 PROFILE = os.environ.get("IWORK_PROFILE", "full").strip().lower()
@@ -210,8 +224,8 @@ def numbers_set(path: str, cells: dict[str, str]) -> str:
 
 @tool("Create a Numbers spreadsheet from a grid of values; first row is the header. Cells starting with '=' become real formulas. Numbers may be written 1360.5 or 1.360,00. column_formats maps a column letter to currency/percent/number/text.")
 def numbers_create(rows: list[list[str]], save_in: str = "",
-                   table_name: str = "", column_formats: dict[str, str] | None = None,
-                   header_rows: int = 1, merge: list[str] | None = None) -> str:
+                   table_name: str = "", column_formats: dict[str, str] = {},
+                   header_rows: int = 1, merge: list[str] = []) -> str:
     """Create a Numbers sheet from a grid of values. First row = headers.
 
     A cell starting with `=` is inserted as a REAL formula and computed by the
@@ -236,7 +250,9 @@ def numbers_create(rows: list[list[str]], save_in: str = "",
         merge: ranges to merge, like `["H1:I1"]` — one CASSA spanning ENTRATE
             and USCITE.
     """
-    return f"Created: {numbers.create(rows, save_in or None, table_name or None, column_formats, header_rows, merge)}"
+    created = numbers.create(rows, save_in or None, table_name or None,
+                             column_formats or None, header_rows, merge or None)
+    return f"Created: {created}"
 
 
 @tool('Export a Numbers sheet. fmt: pdf, excel, csv.')
@@ -303,7 +319,7 @@ def keynote_layouts() -> str:
 
 
 @tool('Create a Keynote presentation from a list of {title, bullets, notes}. Pass theme for a designed look (see keynote_themes).')
-def keynote_create(slides: list[dict], layout: str = "",
+def keynote_create(slides: list[Slide], layout: str = "",
                    save_in: str = "", theme: str = "") -> str:
     """Generate a Keynote presentation and open it on screen.
 
@@ -317,8 +333,8 @@ def keynote_create(slides: list[dict], layout: str = "",
         theme: name of a Keynote theme (see `keynote_themes`). Without one the
             deck comes out in the plain default.
     """
-    n, warnings = keynote.create(slides, layout or None, save_in or None,
-                                 theme or None)
+    n, warnings = keynote.create([s.model_dump() for s in slides],
+                                 layout or None, save_in or None, theme or None)
     reply = f"Presentation created: {n} slides"
     if warnings:
         reply += "\nToo much text to fit:\n" + "\n".join(f"  {w}" for w in warnings)
@@ -412,6 +428,39 @@ def keynote_slide_size(path: str) -> str:
     """
     w, h = keynote.slide_size(path)
     return f"{w}x{h}"
+
+
+def _inline_refs(node: object, defs: dict) -> object:
+    """Replace every `$ref` with the definition it points at.
+
+    Pydantic factors nested models out into `$defs` and references them. That is
+    correct JSON Schema and it is one more construct a client may not follow:
+    the schemas here are consumed by things that compile them into
+    constrained-decoding grammars, and every indirection is a chance to be
+    dropped. Inlining costs a few hundred bytes and removes the question.
+
+    Safe here because the models are shallow and acyclic — a Slide contains only
+    scalars and a list of strings.
+    """
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/"):
+            return _inline_refs(defs.get(ref.rsplit("/", 1)[-1], {}), defs)
+        return {k: _inline_refs(v, defs) for k, v in node.items() if k != "$defs"}
+    if isinstance(node, list):
+        return [_inline_refs(v, defs) for v in node]
+    return node
+
+
+def _flatten_schemas() -> None:
+    """Hand every tool a self-contained schema, with no `$ref` left in it."""
+    for t in server._tool_manager.list_tools():
+        defs = t.parameters.get("$defs")
+        if defs:
+            t.parameters = _inline_refs(t.parameters, defs)
+
+
+_flatten_schemas()
 
 
 if __name__ == "__main__":
