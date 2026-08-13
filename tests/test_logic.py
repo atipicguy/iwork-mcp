@@ -53,6 +53,31 @@ class TestAppleScriptCompiles:
             assert p.returncode == 0, f"{name} non compila:\n{p.stderr}"
 
 
+class TestProfiles:
+    """`lean` exists for local models: qwen3-8b produced no tool call at all
+    against the 20 full descriptions, and the right one against the short set."""
+
+    def test_lean_publishes_fewer_tools_than_full(self, monkeypatch):
+        import importlib
+        import iwork.server_mcp as m
+        monkeypatch.setenv("IWORK_PROFILE", "lean")
+        lean = importlib.reload(m)
+        n_lean = len(lean.server._tool_manager.list_tools())
+        monkeypatch.setenv("IWORK_PROFILE", "full")
+        full = importlib.reload(m)
+        n_full = len(full.server._tool_manager.list_tools())
+        assert 0 < n_lean < n_full
+
+    def test_an_unknown_profile_behaves_like_full(self, monkeypatch):
+        """A typo in the client config must not silently hide half the tools."""
+        import importlib
+        import iwork.server_mcp as m
+        monkeypatch.setenv("IWORK_PROFILE", "leen")
+        assert len(importlib.reload(m).server._tool_manager.list_tools()) == 20
+        monkeypatch.delenv("IWORK_PROFILE")
+        importlib.reload(m)
+
+
 class TestCellTyping:
     """Numbers infers value types, and gets it wrong silently."""
 

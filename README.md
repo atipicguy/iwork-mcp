@@ -37,6 +37,55 @@ Register it in `~/.claude.json`, under `mcpServers`:
 }
 ```
 
+## Local models
+
+The server is a plain stdio MCP server and talks to any MCP host, not only
+Claude Code — verified by driving it from a raw JSON-RPC client: `initialize`,
+`tools/list`, `tools/call`, no Claude anywhere.
+
+**LM Studio** hosts MCP servers directly. Add it to `~/.lmstudio/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "iwork": {
+      "command": "/absolute/path/to/iwork-mcp/.venv/bin/python",
+      "args": ["-m", "iwork.server_mcp"],
+      "cwd": "/absolute/path/to/iwork-mcp",
+      "env": { "IWORK_PROFILE": "lean" }
+    }
+  }
+}
+```
+
+**Ollama** is a model runner, not an MCP host: it has no way to load this by
+itself. It needs a client in between — an MCP-aware front end, or thirty lines
+that call `tools/list`, hand the result to `/api/chat` as tools, and post the
+model's choice back as `tools/call`. The server side needs nothing.
+
+### `IWORK_PROFILE=lean`
+
+Set it and the server publishes 9 tools with one-line descriptions instead of
+20 with full ones. This is not cosmetic. Measured against **qwen3-8b** through
+LM Studio, asking in Italian for a spreadsheet with two bookings and a currency
+column:
+
+| | tools | prompt | result |
+|---|---|---|---|
+| `full` | 20 | 4247 tokens | **no tool call at all**, after 53s |
+| `lean` | 9 | 1220 tokens | correct call, correct arguments, 15s |
+
+The protocol was never the problem; the size of the choice was. The long
+descriptions stay the default because they carry what the apps do silently and
+wrongly, and a capable model uses them — they just do not fit in a small one's
+attention.
+
+Two things the profile cannot fix, both worth knowing before wiring a small
+model to a document generator: qwen3-8b needed **two attempts** to emit the call
+at all, and it wrote `1360,00 euro` into the amount cell, which lands as text
+rather than a number. The server refuses to guess: silently reinterpreting text
+as a number is the exact class of bug the rest of this README is about.
+
 On first use macOS asks for **automation permission** for each app: grant it, or every
 call fails. `iwork_status` is the tool to call first when something is wrong — it
 separates a missing app from a denied permission from a broken script.

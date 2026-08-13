@@ -25,6 +25,7 @@ Registration in `~/.claude.json`, under `mcpServers`:
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
 from mcp.server import MCPServer
@@ -50,7 +51,39 @@ server = MCPServer(
 )
 
 
-@server.tool()
+PROFILE = os.environ.get("IWORK_PROFILE", "full").strip().lower()
+"""`full` (default) or `lean`. Set it in the MCP client's own config.
+
+`lean` exists for **local models**. Measured against qwen3-8b through LM
+Studio: with all 20 tools and their full descriptions — 4.2k tokens of tool
+definitions — the model produced no tool call at all after 53 seconds. With a
+handful of tools and one-line descriptions it picked the right one, with the
+right arguments, in 16 seconds. The protocol was never the problem; the size of
+the choice was.
+
+The long docstrings are still the right default. They carry what the app does
+silently and wrongly, and a capable model uses them. They just do not fit in a
+small one's attention.
+"""
+
+
+def tool(short: str | None = None):
+    """Register a tool, and say whether it survives the lean profile.
+
+    A tool with no `short` text is simply not registered in `lean`: leaving it
+    out entirely is the point, since every extra choice costs a small model
+    accuracy, not just context.
+    """
+    def wrap(fn):
+        if PROFILE != "lean":
+            return server.tool()(fn)
+        if short is None:
+            return fn
+        return server.tool(description=short)(fn)
+    return wrap
+
+
+@tool("Report which iWork apps respond. Call first if something fails.")
 def iwork_status() -> str:
     """Report which iWork apps respond and with what version.
 
@@ -66,7 +99,7 @@ def iwork_status() -> str:
     return "\n".join(out)
 
 
-@server.tool()
+@tool("Create a Pages document. First line becomes the title; lines starting with '# ' become headings.")
 def pages_create(text: str, save_in: str = "", template: str = "") -> str:
     """Create a Pages document with this text and open it on screen.
 
@@ -86,7 +119,7 @@ def pages_create(text: str, save_in: str = "", template: str = "") -> str:
     return f"Created: {pages.create(text, save_in or None, template or None)}"
 
 
-@server.tool()
+@tool()
 def pages_templates() -> str:
     """List the Pages templates installed on this Mac (111 on a stock system).
 
@@ -96,7 +129,7 @@ def pages_templates() -> str:
     return "\n".join(pages.available_templates())
 
 
-@server.tool()
+@tool()
 def pages_read(path: str) -> str:
     """Extract the text of an existing Pages document.
 
@@ -109,7 +142,7 @@ def pages_read(path: str) -> str:
     return pages.read(path)
 
 
-@server.tool()
+@tool('Export a Pages document. fmt: pdf, word, epub, text, rtf.')
 def pages_export(path: str, destination: str, fmt: str = "pdf") -> str:
     """Export a Pages document to PDF, Word or EPUB.
 
@@ -121,7 +154,7 @@ def pages_export(path: str, destination: str, fmt: str = "pdf") -> str:
     return f"Exported to {pages.export(path, destination, fmt)}"
 
 
-@server.tool()
+@tool()
 def pages_replace(path: str, search: str, replacement: str) -> str:
     """Replace text in an existing Pages document, and save it.
 
@@ -142,7 +175,7 @@ def pages_replace(path: str, search: str, replacement: str) -> str:
     return f"Replaced in {n} paragraph{'' if n == 1 else 's'}, document saved."
 
 
-@server.tool()
+@tool()
 def pages_append(path: str, text: str) -> str:
     """Append text at the end of an existing Pages document, and save it.
 
@@ -157,7 +190,7 @@ def pages_append(path: str, text: str) -> str:
     return f"Appended {n} line{'' if n == 1 else 's'}, document saved."
 
 
-@server.tool()
+@tool()
 def numbers_set(path: str, cells: dict[str, str]) -> str:
     """Write specific cells in an existing Numbers sheet, and save it.
 
@@ -175,7 +208,7 @@ def numbers_set(path: str, cells: dict[str, str]) -> str:
     return f"Set {n} cell{'' if n == 1 else 's'}, sheet saved and recalculated."
 
 
-@server.tool()
+@tool("Create a Numbers spreadsheet from a grid of values; first row is the header. Cells starting with '=' become real formulas. Numbers may be written 1360.5 or 1.360,00. column_formats maps a column letter to currency/percent/number/text.")
 def numbers_create(rows: list[list[str]], save_in: str = "",
                    table_name: str = "", column_formats: dict[str, str] | None = None,
                    header_rows: int = 1, merge: list[str] | None = None) -> str:
@@ -206,7 +239,7 @@ def numbers_create(rows: list[list[str]], save_in: str = "",
     return f"Created: {numbers.create(rows, save_in or None, table_name or None, column_formats, header_rows, merge)}"
 
 
-@server.tool()
+@tool('Export a Numbers sheet. fmt: pdf, excel, csv.')
 def numbers_export(path: str, destination: str, fmt: str = "pdf") -> str:
     """Export a Numbers sheet to PDF, Excel or CSV.
 
@@ -222,7 +255,7 @@ def numbers_export(path: str, destination: str, fmt: str = "pdf") -> str:
     return f"Exported to {numbers.export(path, destination, fmt)}"
 
 
-@server.tool()
+@tool()
 def numbers_sort(path: str, column: str, descending: bool = False,
                  header_rows: int = 1, footer_rows: int = 0) -> str:
     """Sort the first table of a Numbers sheet by one column, and save it.
@@ -242,7 +275,7 @@ def numbers_sort(path: str, column: str, descending: bool = False,
     return numbers.sort(path, column, descending, header_rows, footer_rows)
 
 
-@server.tool()
+@tool('Read back a Numbers sheet, with computed formula results.')
 def numbers_read(path: str) -> str:
     """Read back the first table of a Numbers sheet, computed values included.
 
@@ -256,7 +289,7 @@ def numbers_read(path: str) -> str:
     return "\n".join(" | ".join(r) for r in rows) or "(empty table)"
 
 
-@server.tool()
+@tool()
 def keynote_layouts() -> str:
     """List the slide layouts available on this Mac.
 
@@ -266,7 +299,7 @@ def keynote_layouts() -> str:
     return "\n".join(keynote.available_layouts())
 
 
-@server.tool()
+@tool('Create a Keynote presentation from a list of {title, bullets, notes}. Pass theme for a designed look (see keynote_themes).')
 def keynote_create(slides: list[dict], layout: str = "",
                    save_in: str = "", theme: str = "") -> str:
     """Generate a Keynote presentation and open it on screen.
@@ -289,7 +322,7 @@ def keynote_create(slides: list[dict], layout: str = "",
     return reply
 
 
-@server.tool()
+@tool('List the Keynote themes installed on this Mac.')
 def keynote_themes() -> str:
     """List the Keynote themes installed on this Mac (53 on a stock system).
 
@@ -299,7 +332,7 @@ def keynote_themes() -> str:
     return "\n".join(keynote.available_themes())
 
 
-@server.tool()
+@tool('Export the frontmost Keynote deck. fmt: pdf, powerpoint, images.')
 def keynote_export(destination: str, fmt: str = "pdf", notes: bool = False) -> str:
     """Export the frontmost Keynote presentation.
 
@@ -313,7 +346,7 @@ def keynote_export(destination: str, fmt: str = "pdf", notes: bool = False) -> s
     return f"Exported to {keynote.export(destination, fmt, notes)}"
 
 
-@server.tool()
+@tool()
 def keynote_export_pdf(destination: str) -> str:
     """Export the frontmost Keynote presentation to PDF.
 
@@ -323,7 +356,7 @@ def keynote_export_pdf(destination: str) -> str:
     return f"Exported to {keynote.export_pdf(destination)}"
 
 
-@server.tool()
+@tool()
 def keynote_add_image(path: str, slide: int, image: str, width: int = 0,
                       x: int = -1, y: int = -1) -> str:
     """Put an image on a slide of a saved Keynote deck, and save it.
@@ -344,7 +377,7 @@ def keynote_add_image(path: str, slide: int, image: str, width: int = 0,
     return keynote.add_image(path, slide, image, width, x, y)
 
 
-@server.tool()
+@tool()
 def keynote_add_chart(path: str, slide: int, row_names: list[str],
                       column_names: list[str], data: list[list[float]],
                       chart_type: str = "bar", x: int = -1, y: int = -1) -> str:
@@ -364,7 +397,7 @@ def keynote_add_chart(path: str, slide: int, row_names: list[str],
                              chart_type, x, y)
 
 
-@server.tool()
+@tool()
 def keynote_slide_size(path: str) -> str:
     """The slide dimensions of a saved deck, in points.
 
