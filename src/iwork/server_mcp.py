@@ -119,7 +119,7 @@ def pages_create(text: str, save_in: str = "", template: str = "") -> str:
     return f"Created: {pages.create(text, save_in or None, template or None)}"
 
 
-@tool()
+@tool("List the Pages templates installed on this Mac.")
 def pages_templates() -> str:
     """List the Pages templates installed on this Mac (111 on a stock system).
 
@@ -190,7 +190,7 @@ def pages_append(path: str, text: str) -> str:
     return f"Appended {n} line{'' if n == 1 else 's'}, document saved."
 
 
-@tool()
+@tool("Write specific cells in an existing Numbers sheet, like {\"B7\": \"1200\"}. An empty value clears the cell.")
 def numbers_set(path: str, cells: dict[str, str]) -> str:
     """Write specific cells in an existing Numbers sheet, and save it.
 
@@ -255,7 +255,7 @@ def numbers_export(path: str, destination: str, fmt: str = "pdf") -> str:
     return f"Exported to {numbers.export(path, destination, fmt)}"
 
 
-@tool()
+@tool("Sort a Numbers sheet by a column letter. descending for largest first; footer_rows=1 leaves a TOTAL row alone.")
 def numbers_sort(path: str, column: str, descending: bool = False,
                  header_rows: int = 1, footer_rows: int = 0) -> str:
     """Sort the first table of a Numbers sheet by one column, and save it.

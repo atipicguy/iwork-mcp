@@ -65,26 +65,39 @@ model's choice back as `tools/call`. The server side needs nothing.
 
 ### `IWORK_PROFILE=lean`
 
-Set it and the server publishes 9 tools with one-line descriptions instead of
-20 with full ones. This is not cosmetic. Measured against **qwen3-8b** through
-LM Studio, asking in Italian for a spreadsheet with two bookings and a currency
-column:
+Set it and the server publishes 12 tools with one-line descriptions instead of
+20 with full ones. Which of the two you want depends on the model, and the
+numbers below are measured on this machine rather than guessed — with the same
+three prompts in Italian, asking for a spreadsheet, an Excel export and a sort.
 
-| | tools | prompt | result |
-|---|---|---|---|
-| `full` | 20 | 4247 tokens | **no tool call at all**, after 53s |
-| `lean` | 9 | 1220 tokens | correct call, correct arguments, 15s |
+| model | 12 tools (`lean`) | 20 tools (`full`) |
+|---|---|---|
+| qwen3-8b | works, except the hardest task | **no tool call at all**, 4247 tokens |
+| qwen3.6-35b-a3b (MoE) | 4/5 — picked the wrong tool for one | **5/5** |
 
-The protocol was never the problem; the size of the choice was. The long
-descriptions stay the default because they carry what the apps do silently and
-wrongly, and a capable model uses them — they just do not fit in a small one's
-attention.
+Two conclusions, both against the obvious guess.
 
-Two things the profile cannot fix, both worth knowing before wiring a small
-model to a document generator: qwen3-8b needed **two attempts** to emit the call
-at all, and it wrote `1360,00 euro` into the amount cell, which lands as text
-rather than a number. The server refuses to guess: silently reinterpreting text
-as a number is the exact class of bug the rest of this README is about.
+**A 30B-class model does not need a reduced set — it needs the full one.** The
+35B scored *worse* on `lean`, because the task needed `numbers_sort` and the
+profile did not offer it, so the model reached for the nearest thing it had.
+Trimming past what the work requires is its own failure mode. Padded out with
+plausible extra tools, the same model stayed correct at 40, 70 and even 117
+tools; the cost was latency (14s → 30s) and context (4.5k → 13.5k tokens), not
+accuracy. So "too many tools for a local model" is only true of small ones.
+
+**For an 8B, the tool count is not the only wall — the argument schema is.**
+Flat-string tools (`numbers_export`, `numbers_sort`, `numbers_read`) are
+reliable. `numbers_create`, which takes an array of arrays plus a formats
+object, succeeded once in five runs at 9 tools and zero in five at 12: both
+effectively unreliable, and the difference between them is noise. It is the
+most complex schema in the set by a wide margin, and it is the one that fails.
+
+So `lean` buys an 8B the ability to call *anything*. It does not buy reliable
+grid-building, and no amount of trimming will — that needs a simpler input
+shape, not a shorter list.
+
+The server cannot pick the profile for you: MCP's `initialize` carries the
+*client* name, not which model is behind it. It has to be set in the config.
 
 On first use macOS asks for **automation permission** for each app: grant it, or every
 call fails. `iwork_status` is the tool to call first when something is wrong — it
