@@ -99,7 +99,7 @@ separates a missing app from a denied permission from a broken script.
 | `pages_templates` | the 111 installed templates, by name |
 | `pages_export` | PDF, Word, EPUB, plain text, RTF |
 | `pages_replace` / `pages_append` | edit an existing document **without wrecking its styles** |
-| `numbers_create` / `numbers_read` | spreadsheets, with **real formulas** |
+| `numbers_create` / `numbers_read` | spreadsheets, with **real formulas**; read them back as text or as results |
 | `numbers_set` | write specific cells in an existing sheet; the app recalculates |
 | `numbers_sort` | sort by a column, header left in place |
 | `numbers_export` | PDF, Excel, CSV |
@@ -245,9 +245,12 @@ modulo operator. The test suite runs `osacompile` over every script in the
 package, which catches the whole first family in milliseconds without opening an
 app; the second kind only surfaces when the script actually runs.
 
-**Formulas come back localized.** Write `=SUM(B2:B4)`, read the cell's `formula`
-property, and you get `=SOMMA(B2:B4)` on an Italian Mac. A round-trip that
-rewrites what it reads will produce formulas that only work in one language.
+**Formulas can be read back, and come back localized.** The `cell` class has a
+read-only `formula` property, so `numbers_read(formulas=True)` returns
+`=SOMMA(B2:B4)` for a cell written as `=SUM(B2:B4)`. Both halves matter: it is
+worth knowing that reading is possible at all, and worth knowing that a
+round-trip which rewrites what it reads produces formulas that work in one
+language only.
 
 **A CSV export is not comma-separated.** Numbers writes it with the system list
 separator — `;` here — and with the *formatted* values, so a currency column

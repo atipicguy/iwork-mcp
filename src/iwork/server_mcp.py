@@ -276,16 +276,19 @@ def numbers_sort(path: str, column: str, descending: bool = False,
 
 
 @tool('Read back a Numbers sheet, with computed formula results.')
-def numbers_read(path: str) -> str:
+def numbers_read(path: str, formulas: bool = False) -> str:
     """Read back the first table of a Numbers sheet, computed values included.
 
-    Formulas come back with their result, not with the formula text. Numbers are
-    localized: on an Italian Mac decimals use a comma.
+    Numbers are localized: on an Italian Mac decimals use a comma.
 
     Args:
         path: path to the `.numbers` file.
+        formulas: return the formula text for cells that hold one, instead of
+            its result. The text comes back localized — `=SUM(B2:B3)` reads as
+            `=SOMMA(B2:B3)` on an Italian Mac — so do not feed it straight back
+            into a sheet on another machine.
     """
-    rows = numbers.read(path)
+    rows = numbers.read(path, formulas)
     return "\n".join(" | ".join(r) for r in rows) or "(empty table)"
 
 

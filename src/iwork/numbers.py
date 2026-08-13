@@ -132,6 +132,7 @@ end run
 _READ = '''
 on run argv
   set thePath to item 1 of argv
+  set wantFormulas to (item 2 of argv) is "1"
   set f to POSIX file thePath
   tell application "Numbers"
     set wasOpen to false
@@ -153,7 +154,14 @@ on run argv
       repeat with i from 1 to nr
         repeat with j from 1 to nc
           try
-            set raw to value of cell j of row i
+            if wantFormulas then
+              set raw to formula of cell j of row i
+              if raw is missing value or raw is "" then
+                set raw to value of cell j of row i
+              end if
+            else
+              set raw to value of cell j of row i
+            end if
             -- an empty cell is `missing value`, which coerced to a string
             -- becomes the text "missing value": it would land in the data as
             -- if someone had actually typed it
@@ -475,11 +483,19 @@ def export(path: str, destination: str, fmt: str = "pdf") -> str:
                name, app="Numbers")
 
 
-def read(path: str) -> list[list[str]]:
+def read(path: str, formulas: bool = False) -> list[list[str]]:
     """Read back the first table of a `.numbers` file as rows of strings.
 
-    The values are the *computed* ones: a cell holding a formula comes back with
-    its result. They are localized — on an Italian Mac decimals use a comma.
+    By default the values are the *computed* ones: a cell holding a formula
+    comes back with its result. They are localized — on an Italian Mac decimals
+    use a comma.
+
+    With `formulas=True` a cell that holds a formula returns the formula text
+    instead, and the others still return their value. Note that the text comes
+    back **localized**: `=SUM(B2:B3)` reads as `=SOMMA(B2:B3)` on an Italian
+    Mac, so a round-trip that rewrites what it reads produces formulas that only
+    work in one language.
     """
-    raw = run(_READ, _existing_path(path), app="Numbers")
+    raw = run(_READ, _existing_path(path), "1" if formulas else "0",
+              app="Numbers")
     return [r.split("\t") for r in raw.splitlines() if r.strip()]
